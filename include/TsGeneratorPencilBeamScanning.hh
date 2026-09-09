@@ -2,10 +2,7 @@
 #define TsGeneratorPencilBeamScanning_hh
 
 #include "TsVGenerator.hh"
-
-#include <cstddef>
-
-class TsSourcePencilBeamScanning;
+#include "TsSourcePencilBeamScanning.hh"
 
 class TsGeneratorPencilBeamScanning : public TsVGenerator
 {
@@ -19,12 +16,9 @@ public:
 	void GeneratePrimaries(G4Event* anEvent);
 
 private:
-	void ResetScheduler();
-	void AdvanceToNextSpotWithHistories();
+	void SamplePrimary(const TsPBSPreparedSpot& prepared, G4Event* anEvent);
 
 	TsSourcePencilBeamScanning* fPBS;
-	std::size_t fCurrentSpot;
-	G4long fRemainingInSpot;
 };
 
 #endif

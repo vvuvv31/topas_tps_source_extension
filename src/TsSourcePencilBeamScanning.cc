@@ -6,6 +6,7 @@
 
 #include "G4SystemOfUnits.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <initializer_list>
 #include <sstream>
@@ -24,6 +25,7 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 {
 	TsSource::ResolveParameters();
 	fPreparedSpots.clear();
+	fHistoryBegin.clear();
 	fTotalHistories = 0;
 
 	try {
@@ -123,6 +125,11 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 		if (fTotalHistories > 1000000000L)
 			throw std::runtime_error("total histories exceed 1e9");
 
+		fHistoryBegin.resize(fPreparedSpots.size() + 1);
+		fHistoryBegin[0] = 0;
+		for (std::size_t i = 0; i < fPreparedSpots.size(); ++i)
+			fHistoryBegin[i + 1] = fHistoryBegin[i] + fPreparedSpots[i].histories;
+
 		fNumberOfHistoriesInRun = fTotalHistories;
 
 		G4cout << "PencilBeamScanning source " << fSourceName
@@ -138,9 +145,22 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 				? "" : " (default)") << G4endl;
 		G4cout << "  VirtualScanningMagnetic X/Y = " << vsadX << " / " << vsadY
 			<< " mm, VirtualSourceToIsocenterDistance = " << sad << " mm" << G4endl;
+		G4cout << "  History-to-spot map is event-ID based (MT-safe)." << G4endl;
 	} catch (const std::exception& exc) {
 		G4cerr << "Topas is exiting due to a serious error in source " << fSourceName << G4endl;
 		G4cerr << exc.what() << G4endl;
 		fPm->AbortSession(1);
 	}
+}
+
+const TsPBSPreparedSpot* TsSourcePencilBeamScanning::SpotForHistory(G4long historyIndex) const
+{
+	if (historyIndex < 0 || fHistoryBegin.size() < 2)
+		return nullptr;
+	if (historyIndex >= fHistoryBegin.back())
+		return nullptr;
+
+	auto it = std::upper_bound(fHistoryBegin.begin(), fHistoryBegin.end(), historyIndex);
+	const std::size_t spotIndex = static_cast<std::size_t>(std::distance(fHistoryBegin.begin(), it) - 1);
+	return &fPreparedSpots[spotIndex];
 }

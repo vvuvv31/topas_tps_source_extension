@@ -26,10 +26,15 @@ public:
 	const std::vector<TsPBSPreparedSpot>& PreparedSpots() const { return fPreparedSpots; }
 	G4long TotalHistories() const { return fTotalHistories; }
 
+	// Map a run-global history / Geant4 event ID onto the owning spot.
+	// Thread-safe: read-only after ResolveParameters. Returns nullptr if out of range.
+	const TsPBSPreparedSpot* SpotForHistory(G4long historyIndex) const;
+
 private:
 	TsPBSSpotPlan fPlan;
 	TsPBSBeamModel fBeamModel;
 	std::vector<TsPBSPreparedSpot> fPreparedSpots;
+	std::vector<G4long> fHistoryBegin;
 	G4long fTotalHistories;
 };
 

@@ -1,8 +1,72 @@
-# TOPAS TPS Source extension
+# TOPAS TPS Source Extension
 
-Add pencil beam scanning support for [TOPAS](https://github.com/OpenTOPAS/OpenTOPAS).
+Pencil beam scanning (PBS) particle source for [TOPAS](https://github.com/OpenTOPAS/OpenTOPAS) / OpenTOPAS.
 
-This is an OpenTOPAS particle-source extension. It reads a compact spot-plan CSV plus an energy-dependent machine beam model, then generates primaries with scanning-magnet steering and BiGaussian emittance. Treatment-plan vendor formats and DICOM stay outside this source.
+This is a TOPAS source extension (`TsSource` + `TsVGenerator` pair). It reads a compact spot-plan CSV plus an energy-dependent machine beam model, then generates primaries with scanning-magnet steering and BiGaussian emittance. Treatment-plan vendor formats and DICOM stay outside this source — convert them to CSV first.
+
+Current version is MT-safe: each Geant4 event ID in `[0, N)` maps to exactly one history on one spot via a read-only prefix-sum table, so workers generate disjoint spots without shared mutable state.
+
+## Layout
+
+```text
+include/
+  TsSourcePencilBeamScanning.hh      # source, owns spot preparation + history->spot map
+  TsGeneratorPencilBeamScanning.hh   # generator, samples one primary per event
+  TsPBSSpotPlan.hh                   # spot-plan CSV loader
+  TsPBSBeamModel.hh                  # beam-model CSV loader + lookup/interpolation
+  TsPBSCoordinateModel.hh            # TPS / ComponentLocal ray geometry
+src/
+  TsSourcePencilBeamScanning.cc
+  TsGeneratorPencilBeamScanning.cc
+  TsPBSSpotPlan.cc
+  TsPBSBeamModel.cc
+  TsPBSCoordinateModel.cc
+```
+
+Drop these files into a TOPAS extension build (source + generator + extra classes) and register the `PencilBeamScanning` source type name.
+
+## Input files
+
+Both CSVs are case-insensitive on headers, tolerate surrounding whitespace, and skip blank lines and `#` comment lines. First non-comment line must be the header.
+
+### Spot plan (`SpotPlanFile`)
+
+Required columns: `x`, `y`, `energy`, `weight`. Optional: `spot_id` / `id`.
+
+Aliases: `x_mm` for `x`, `y_mm` for `y`, `energy_mev` for `energy`.
+
+| column | unit | meaning |
+| --- | --- | --- |
+| `x`, `y` | mm, isocenter plane | spot position |
+| `energy` | MeV (per nucleon-equivalent as passed to TOPAS) | spot energy |
+| `weight` | histories (see `WeightMode`) | primaries for this spot |
+| `spot_id` / `id` | non-negative integer, optional | kept as `TsPBSSpot::id`; defaults to row index |
+
+Example:
+
+```csv
+x,y,energy,weight
+-40.0,12.0,150.2,1000
+-30.0,12.0,150.2,1000
+```
+
+Validation: `energy > 0`, `weight >= 0`. Zero-weight rows are counted and skipped by default (`SkipZeroWeightSpots`). A plan with no usable spots aborts the session.
+
+### Beam model (`BeamModelFile`)
+
+Required columns: `energy`, `sigma_x_mm`, `sigma_xp_rad`, `corr_x`, `sigma_y_mm`, `sigma_yp_rad`, `corr_y`, `energy_spread_percent`.
+
+Aliases: `energy_mev`, `sigmax`, `sigmaxprime`, `correlationx`, `sigmay`, `sigmayprime`, `correlationy`, `energyspread`.
+
+Example:
+
+```csv
+energy,sigma_x_mm,sigma_xp_rad,corr_x,sigma_y_mm,sigma_yp_rad,corr_y,energy_spread_percent
+150.2,3.1,0.0042,-0.55,3.3,0.0045,-0.60,0.35
+200.5,2.6,0.0036,-0.50,2.8,0.0038,-0.55,0.30
+```
+
+Validation: `energy > 0`, sigmas `>= 0`, correlations in `[-1, 1]`, energy spread `>= 0`, no duplicate energies (relative tolerance `1e-6`). Rows are sorted by energy. Exact-match lookup always works; in-between energies require `InterpolateBeamModel = "True"` (linear interpolation), otherwise the run aborts. Out-of-range energies always abort.
 
 ## Parameters
 
@@ -26,13 +90,25 @@ i:So/CarbonPBS/FirstSpot = 0
 i:So/CarbonPBS/LastSpot = -1
 ```
 
-`NumberOfHistoriesInRun` is set from the selected spots. Do not use Time Feature vectors for per-spot energy or optics.
+| parameter | type | default | meaning |
+| --- | --- | --- | --- |
+| `SpotPlanFile` | string | — (required) | spot-plan CSV path |
+| `BeamModelFile` | string | — (required) | beam-model CSV path |
+| `VirtualScanningMagneticX` (`VirtualSADX`) | Length | — (required, `> 0`) | virtual SAD for X steering |
+| `VirtualScanningMagneticY` (`VirtualSADY`) | Length | — (required, `> 0`) | virtual SAD for Y steering |
+| `VirtualSourceToIsocenterDistance` (`SAD`, `SourceToIsocenterDistance`) | Length | — (required, `> 0`) | source-plane to isocenter distance |
+| `WeightMode` | string | `"Histories"` | only `Histories` is supported; CSV `weight` = number of primaries |
+| `HistoriesScale` | unitless | `1.0` | per-spot histories = `llround(weight * HistoriesScale)`; must be `>= 0`; spots rounding to `<= 0` are skipped |
+| `SkipZeroWeightSpots` | bool | `"True"` | skip `weight == 0` rows (still counted in the log) |
+| `InterpolateBeamModel` | bool | `"False"` | allow linear interpolation between beam-model energies |
+| `FirstSpot` / `LastSpot` | int | `0` / `-1` | inclusive sub-range of the loaded plan; `-1` means last spot |
+| `SpotCoordinateConvention` (`CoordinateConvention`) | string | `"TPS"` | `TPS` (also accepts `IEC61217`) or `ComponentLocal` |
 
-`WeightMode = Histories` means CSV `weight` is the number of primaries. Sequential delivery: spot 0 is fully generated, then spot 1, and so on.
+Notes:
 
-`Ts/NumberOfThreads` should stay 1. Sequential spot state is not validated in MT.
-
-`SpotCoordinateConvention` defaults to `TPS`. Do not put it in the script unless you override it with `ComponentLocal`.
+- `NumberOfHistoriesInRun` is set automatically from the selected spots (`fNumberOfHistoriesInRun = total`). Do not set it manually and do not use Time Feature vectors for per-spot energy or optics.
+- Total histories are capped at `1e9`; empty selections abort with an error.
+- Only `WeightMode = Histories` exists in this version. There is no MU-to-particle calibration.
 
 ## Geometry
 
@@ -48,14 +124,45 @@ s:Ge/PBSBeamFrame/Parent = "IEC_G"
 s:Ge/PBSBeamFrame/Type   = "Group"
 ```
 
-`PBSBeamFrame` sits at the isocenter. The source puts the source plane at `y = -VirtualSourceToIsocenterDistance` and aims every spot at the origin. Do not translate or rotate `PBSBeamFrame` to place the nozzle. Change `IEC_G` rotations for other gantry angles.
+- `PBSBeamFrame` sits at the isocenter. Do not translate or rotate it to place the nozzle — change `IEC_G` rotations for other gantry angles.
+- The source plane is at `y = -VirtualSourceToIsocenterDistance` (TPS convention) and every spot is aimed at the isocenter origin.
+- `VirtualScanningMagneticX/Y` are the scanning-magnet virtual distances used for spot steering: `thetaX = atan(xIso / VSADX)`, `thetaY = atan(yIso / VSADY)`.
 
-`VirtualSourceToIsocenterDistance` is the source-to-isocenter distance. `VirtualScanningMagneticX/Y` are the scanning-magnet virtual distances used for spot steering.
+### Coordinate conventions
 
-## Limitations (version 1)
+Default `TPS` (built-in IEC mapping, no user rotation needed):
 
-- No DICOM / vendor plan parser
-- No MU-to-particle calibration
-- No delivery timing / interplay
-- Sequential scheduling only; not MT-safe
+- component origin = isocenter
+- component +X = TPS scan X
+- component +Y = beam (gantry 0: `y-` → `y+`)
+- component +Z = TPS scan Y
+- direction: `(tx, 1, ty) / sqrt(tx² + 1 + ty²)` with `tx = tan(thetaX)`, `ty = tan(thetaY)`
+
+`ComponentLocal` leaves +Z as the beam (`(tx, ty, 1)` normalized) so a user-supplied component rotation can remap the axes. Only set `SpotCoordinateConvention` when overriding the default.
+
+## Sampling
+
+Per event, the generator looks up the owning spot from the event ID (`SpotForHistory`), then:
+
+- Transverse phase space: correlated BiGaussian. With `ux, vx, uy, vy ~ N(0,1)`:
+  `dx = sigmaX·ux`, `x' = sigmaXp·(corrX·ux + vx·sqrt(1-corrX²))`, same for Y.
+- Direction: nominal steering angles plus sampled `x'`/`y'`, converted with `tan` and normalized (see convention above).
+- Energy: `E ~ N(E_spot, E_spot·spread%/100)`; resampled while `E <= 0`. Zero spread gives monoenergetic spots.
+- Start position: nominal source-plane point plus sampled offsets (`dx` along component X; `dy` along component Z in TPS mode, Y in `ComponentLocal` mode).
+- `p.weight = 1`, `isNewHistory = true`, particle type from `BeamParticle`, then `TransformPrimaryForComponent`.
+
+## Multithreading
+
+`Ts/NumberOfThreads` may be greater than 1. The history-to-spot table (`fHistoryBegin` prefix sums) is built once in `ResolveParameters` and read-only afterwards; `SpotForHistory` is a binary search (`upper_bound`) with no mutable state. Geant4 thread-local RNGs sample optics independently per event. Time-ordered delivery / interplay is still not modeled — MT workers generate spots concurrently.
+
+## Limitations
+
+- No DICOM / vendor plan parser (convert to CSV first)
+- No MU-to-particle calibration (`HistoriesScale` is a plain multiplier)
+- No delivery timing / interplay; no time-ordered spot delivery (MT is concurrent)
 - BiGaussian emittance only
+- `WeightMode = Histories` only
+
+## License
+
+MIT — see [LICENSE](LICENSE).
