@@ -25,6 +25,10 @@ example/
   pbs_water.txt                # minimal runnable TOPAS parameter file (water phantom)
   spots.csv                    # 6-spot plan, 1200 histories total
   beam_model.csv               # machine optics for the spot energies
+  dij/
+    pbs_dij_template.txt       # per-spot Dij template (water phantom, @TOKENS@)
+    run_dij.py                 # render + run one TOPAS job per spot
+    assemble_dij.py            # stack per-spot doses into sparse Dij (.npz + .mat)
 ```
 
 Drop these files into a TOPAS extension build (source + generator + extra classes) and register the `PencilBeamScanning` source type name.
@@ -107,6 +111,8 @@ i:So/CarbonPBS/LastSpot = -1
 | `InterpolateBeamModel` | bool | `"False"` | allow linear interpolation between beam-model energies |
 | `FirstSpot` / `LastSpot` | int | `0` / `-1` | inclusive sub-range of the loaded plan; `-1` means last spot |
 | `SpotCoordinateConvention` (`CoordinateConvention`) | string | `"TPS"` | `TPS` (also accepts `IEC61217`) or `ComponentLocal` |
+| `DijMode` | bool | `"False"` | Dij mode: every selected spot gets `DijHistoriesPerSpot` histories; CSV weights, `HistoriesScale` and `SkipZeroWeightSpots` are ignored so each beamlet yields one comparable Dij column |
+| `DijHistoriesPerSpot` | int | — (required if `DijMode`) | fixed histories per spot, `> 0` |
 
 Notes:
 
@@ -191,6 +197,22 @@ Per event, the generator looks up the owning spot from the event ID (`SpotForHis
 - `beam_model.csv` — machine optics rows covering every spot energy, so the default `InterpolateBeamModel = "False"` works.
 
 Provenance and adaptations: machine numbers (`VirtualScanningMagneticX/Y = 6227.8 / 7008.6 mm`, `SAD = 450 mm`, beam optics, spot positions/energies) come from the RT06423 full-plan case (`run_full_plan.txt`, `spots.csv`, `beam_model.csv`), which instead simulates ~1100 spots / ~15M histories on a DICOM patient with custom LET scorers. The example replaces the DICOM patient with a `G4_WATER` box, drops the custom `myHadronLET` scorers (they need a separate scorer extension), shrinks the plan to 6 spots with small weights, spells out the current-version parameters (`InterpolateBeamModel`, `FirstSpot`, `LastSpot`), and runs 4 threads to demonstrate the MT-safe mapping. Gantry is TPS 0° (`IEC_G/RotZ = 0`); see "Gantry angle" above for other angles.
+
+## Dij mode (per-spot 3D dose for optimization)
+
+`DijMode` simulates every selected spot with the same fixed number of histories, so each beamlet (energy × position) yields one comparable 3D dose column for later dose optimization (`physical dose ≈ Dij · x`).
+
+- `b:So/<name>/DijMode = "True"` + `i:So/<name>/DijHistoriesPerSpot = 100000`.
+- CSV weights, `HistoriesScale` and `SkipZeroWeightSpots` are ignored; zero-weight rows are kept so Dij column `k` always corresponds to plan index `FirstSpot + k`.
+- `NumberOfHistoriesInRun` is set to `nSpots × DijHistoriesPerSpot` automatically; the event-ID history map and the generator are unchanged.
+- Workflow is one TOPAS run per spot (each with `FirstSpot = LastSpot = plan index` and its own scorer `OutputFile`), then stacking. `example/dij/` implements it:
+  - `pbs_dij_template.txt` — per-spot template (water phantom) with `@FIRST_SPOT@`, `@LAST_SPOT@`, `@DIJ_HISTORIES@`, `@OUTPUT_FILE@`, `@SEED@` tokens. For your own plan, copy your full-plan file into a template and swap those four parameters for tokens (keep one binary `DoseToMedium` scorer).
+  - `run_dij.py` — renders one parameter file per spot, runs TOPAS (`--topas`, default `topas`), skips finished spots on resume, writes `dij_index.csv` (column → plan_index / spot_id / x / y / energy / histories / bin file). Start small: `--max-spots 3 --dry-run` first, then `--histories-per-spot 100000`.
+  - `assemble_dij.py` — reads `dij_index.csv` + per-spot `.bin`/`.binheader`, thresholds, and stacks columns into a sparse CSC matrix `(nVoxels, nSpots)`, float64 dose in Gy for `histories_per_spot` histories.
+- Dose threshold (user-defined, script side): `--threshold` is an absolute cut in Gy, `--relative-threshold` a per-column fraction of the column max (e.g. `0.01` drops voxels below 1% of that spot's max). Effective per-column cut = `max(threshold, relative-threshold × column max)`; a voxel is kept only if its dose is strictly above the cut. Defaults (`0.0`/`0.0`) keep all nonzero voxels. The applied cuts are recorded in the `.json` sidecar.
+- Voxel ordering follows the TOPAS binary layout (X fastest): flat row `r = (iz·ny + iy)·nx + ix` (0-based), i.e. `np.fromfile(bin, dtype='<f8').reshape((nz, ny, nx))` in C order.
+- Outputs: `<out>.npz` (sparse CSC) + `<out>.json` (grid, cuts, spot table), and `<out>.mat` — a plain v5 file where `Dij` loads as a MATLAB sparse matrix (`load('dij.mat')`), plus `spot_id/spot_x_mm/spot_y_mm/spot_energy_mev/plan_index`, `histories_per_spot`, `nx/ny/nz`, voxel sizes, `voxel_order`. Since the matrix itself is stored (not index triplets), there is no 0-based/1-based issue.
+- Scaling for the optimizer: with particle counts `x` per Dij column, physical dose = `Dij * (x / histories_per_spot)` (MATLAB: `dose = Dij * (x / H)`).
 
 ## Limitations
 

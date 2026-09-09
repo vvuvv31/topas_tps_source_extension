@@ -13,7 +13,7 @@
 #include <stdexcept>
 
 TsSourcePencilBeamScanning::TsSourcePencilBeamScanning(TsParameterManager* pM, TsSourceManager* psM, G4String sourceName)
-: TsSource(pM, psM, sourceName), fTotalHistories(0)
+: TsSource(pM, psM, sourceName), fTotalHistories(0), fDijMode(false), fDijHistoriesPerSpot(0)
 {
 	ResolveParameters();
 }
@@ -27,6 +27,8 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 	fPreparedSpots.clear();
 	fHistoryBegin.clear();
 	fTotalHistories = 0;
+	fDijMode = false;
+	fDijHistoriesPerSpot = 0;
 
 	try {
 		const G4String planFile = fPm->GetStringParameter(GetFullParmName("SpotPlanFile"));
@@ -53,6 +55,30 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 		G4StrUtil::to_lower(weightModeLower);
 		if (weightModeLower != "histories")
 			throw std::runtime_error("only WeightMode=Histories is supported");
+
+		// Dij mode: every selected spot is simulated with the same fixed
+		// number of histories so each spot yields one comparable Dij column
+		// (3D dose per beamlet) for later dose optimization. CSV weights,
+		// HistoriesScale and SkipZeroWeightSpots are ignored in this mode.
+		G4bool dijMode = false;
+		if (fPm->ParameterExists(GetFullParmName("DijMode")))
+			dijMode = fPm->GetBooleanParameter(GetFullParmName("DijMode"));
+		G4long dijHistoriesPerSpot = 0;
+		if (dijMode) {
+			if (!fPm->ParameterExists(GetFullParmName("DijHistoriesPerSpot")))
+				throw std::runtime_error("DijMode requires DijHistoriesPerSpot");
+			const G4int dijHist = fPm->GetIntegerParameter(GetFullParmName("DijHistoriesPerSpot"));
+			if (dijHist <= 0)
+				throw std::runtime_error("DijHistoriesPerSpot must be > 0");
+			dijHistoriesPerSpot = static_cast<G4long>(dijHist);
+			if (historiesScale != 1.0)
+				G4cout << "PencilBeamScanning source " << fSourceName
+					<< ": WARNING: HistoriesScale is ignored in DijMode." << G4endl;
+			if (!skipZero)
+				G4cout << "PencilBeamScanning source " << fSourceName
+					<< ": note: all selected spots are simulated in DijMode, "
+					<< "including zero-weight rows." << G4endl;
+		}
 
 		G4String conventionName = "TPS";
 		if (fPm->ParameterExists(GetFullParmName("SpotCoordinateConvention")))
@@ -83,7 +109,9 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 			throw std::runtime_error("VirtualSourceToIsocenterDistance is required");
 		const G4double sad = fPm->GetDoubleParameter(sadName, "Length") / mm;
 
-		fPlan.Load(std::string(planFile), skipZero);
+		// In DijMode zero-weight rows are kept: every selected beamlet needs
+		// its own Dij column, so plan indices must not shift.
+		fPlan.Load(std::string(planFile), dijMode ? false : skipZero);
 		fBeamModel.Load(std::string(modelFile));
 
 		G4int firstSpot = 0;
@@ -106,9 +134,16 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 
 		for (std::size_t i = static_cast<std::size_t>(firstSpot); i <= lastIndex; ++i) {
 			const TsPBSSpot& spot = fPlan.At(i);
-			const G4long histories = static_cast<G4long>(std::llround(spot.weight * historiesScale));
-			if (histories <= 0)
-				continue;
+			G4long histories = 0;
+			if (dijMode) {
+				// Fixed per-spot histories; zero-weight rows are kept so that
+				// Dij column k always corresponds to plan index FirstSpot + k.
+				histories = dijHistoriesPerSpot;
+			} else {
+				histories = static_cast<G4long>(std::llround(spot.weight * historiesScale));
+				if (histories <= 0)
+					continue;
+			}
 
 			TsPBSPreparedSpot prepared;
 			prepared.spot = spot;
@@ -132,6 +167,9 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 
 		fNumberOfHistoriesInRun = fTotalHistories;
 
+		fDijMode = dijMode;
+		fDijHistoriesPerSpot = dijHistoriesPerSpot;
+
 		G4cout << "PencilBeamScanning source " << fSourceName
 			<< ": " << fPreparedSpots.size() << " spots, "
 			<< fTotalHistories << " histories"
@@ -145,7 +183,12 @@ void TsSourcePencilBeamScanning::ResolveParameters()
 				? "" : " (default)") << G4endl;
 		G4cout << "  VirtualScanningMagnetic X/Y = " << vsadX << " / " << vsadY
 			<< " mm, VirtualSourceToIsocenterDistance = " << sad << " mm" << G4endl;
-		G4cout << "  History-to-spot map is event-ID based (MT-safe)." << G4endl;
+		if (dijMode)
+			G4cout << "  DijMode: " << fPreparedSpots.size() << " spots x "
+				<< dijHistoriesPerSpot << " histories/spot (plan indices "
+				<< firstSpot << ".." << lastIndex << ")" << G4endl;
+		else
+			G4cout << "  History-to-spot map is event-ID based (MT-safe)." << G4endl;
 	} catch (const std::exception& exc) {
 		G4cerr << "Topas is exiting due to a serious error in source " << fSourceName << G4endl;
 		G4cerr << exc.what() << G4endl;
@@ -163,4 +206,12 @@ const TsPBSPreparedSpot* TsSourcePencilBeamScanning::SpotForHistory(G4long histo
 	auto it = std::upper_bound(fHistoryBegin.begin(), fHistoryBegin.end(), historyIndex);
 	const std::size_t spotIndex = static_cast<std::size_t>(std::distance(fHistoryBegin.begin(), it) - 1);
 	return &fPreparedSpots[spotIndex];
+}
+
+G4bool TsSourcePencilBeamScanning::DijPlanIndex(std::size_t preparedIndex, std::size_t firstSpot, std::size_t& planIndex) const
+{
+	if (!fDijMode || preparedIndex >= fPreparedSpots.size())
+		return false;
+	planIndex = firstSpot + preparedIndex;
+	return planIndex < fPlan.Size();
 }

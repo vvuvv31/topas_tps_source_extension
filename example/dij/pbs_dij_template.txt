@@ -1,0 +1,65 @@
+# Dij template: one beamlet (one spot) per run, water phantom, TPS gantry 0.
+#
+# This template is rendered by run_dij.py, which replaces the @TOKENS@:
+#   @FIRST_SPOT@, @LAST_SPOT@  plan indices of the beamlet (equal for one spot)
+#   @DIJ_HISTORIES@            fixed histories for this Dij column
+#   @OUTPUT_FILE@              scorer OutputFile for this spot (no extension)
+#   @SEED@                     per-spot random seed (base seed + column)
+#
+# To build a Dij for your own plan: copy your full-plan parameter file to a
+# template, then (1) add the DijMode block below, (2) replace FirstSpot /
+# LastSpot / OutputFile / Seed with the tokens above, (3) keep one
+# DoseToMedium scorer with OutputType binary.
+
+i:Ts/Seed = @SEED@
+i:Ts/NumberOfThreads = 4
+i:Ts/ShowHistoryCountAtInterval = 100000
+b:Gr/Enable = "False"
+
+s:Ge/World/Material = "Air"
+d:Ge/World/HLX      = 1.0 m
+d:Ge/World/HLY      = 1.0 m
+d:Ge/World/HLZ      = 1.0 m
+
+s:Ge/Phantom/Parent   = "World"
+s:Ge/Phantom/Type     = "TsBox"
+s:Ge/Phantom/Material = "G4_WATER"
+d:Ge/Phantom/HLX      = 100. mm
+d:Ge/Phantom/HLY      = 100. mm
+d:Ge/Phantom/HLZ      = 100. mm
+s:Ge/Phantom/Color    = "blue"
+
+s:Ge/IEC_F/Parent = "World"
+s:Ge/IEC_F/Type   = "Group"
+s:Ge/IEC_G/Parent = "IEC_F"
+s:Ge/IEC_G/Type   = "Group"
+d:Ge/IEC_G/RotX = 0. deg
+d:Ge/IEC_G/RotY = 0. deg
+d:Ge/IEC_G/RotZ = 0. deg
+
+s:Ge/PBSBeamFrame/Parent = "IEC_G"
+s:Ge/PBSBeamFrame/Type   = "Group"
+
+s:Sc/Dose/Quantity                  = "DoseToMedium"
+s:Sc/Dose/Component                 = "Phantom"
+i:Sc/Dose/XBins                     = 20
+i:Sc/Dose/YBins                     = 20
+i:Sc/Dose/ZBins                     = 20
+s:Sc/Dose/OutputType                = "binary"
+s:Sc/Dose/OutputFile                = "@OUTPUT_FILE@"
+s:Sc/Dose/IfOutputFileAlreadyExists = "Overwrite"
+
+s:So/CarbonPBS/Type = "PencilBeamScanning"
+s:So/CarbonPBS/Component = "PBSBeamFrame"
+s:So/CarbonPBS/BeamParticle = "GenericIon(6,12,6)"
+s:So/CarbonPBS/SpotPlanFile = "../spots.csv"
+s:So/CarbonPBS/BeamModelFile = "../beam_model.csv"
+d:So/CarbonPBS/VirtualScanningMagneticX = 6227.8 mm
+d:So/CarbonPBS/VirtualScanningMagneticY = 7008.6 mm
+d:So/CarbonPBS/VirtualSourceToIsocenterDistance = 450 mm
+b:So/CarbonPBS/DijMode = "True"
+i:So/CarbonPBS/DijHistoriesPerSpot = @DIJ_HISTORIES@
+i:So/CarbonPBS/FirstSpot = @FIRST_SPOT@
+i:So/CarbonPBS/LastSpot = @LAST_SPOT@
+
+sv:Ph/Default/Modules = 7 "g4em-standard_opt4" "g4h-phy_QGSP_BIC_HP" "g4decay" "g4ion-inclxx" "g4h-elastic_HP" "g4stopping" "g4radioactivedecay"
