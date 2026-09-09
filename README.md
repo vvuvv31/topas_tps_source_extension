@@ -21,6 +21,10 @@ src/
   TsPBSSpotPlan.cc
   TsPBSBeamModel.cc
   TsPBSCoordinateModel.cc
+example/
+  pbs_water.txt                # minimal runnable TOPAS parameter file (water phantom)
+  spots.csv                    # 6-spot plan, 1200 histories total
+  beam_model.csv               # machine optics for the spot energies
 ```
 
 Drop these files into a TOPAS extension build (source + generator + extra classes) and register the `PencilBeamScanning` source type name.
@@ -128,6 +132,29 @@ s:Ge/PBSBeamFrame/Type   = "Group"
 - The source plane is at `y = -VirtualSourceToIsocenterDistance` (TPS convention) and every spot is aimed at the isocenter origin.
 - `VirtualScanningMagneticX/Y` are the scanning-magnet virtual distances used for spot steering: `thetaX = atan(xIso / VSADX)`, `thetaY = atan(yIso / VSADY)`.
 
+### Gantry angle: TPS angle = −IEC_G
+
+A TPS gantry angle `θ` is set as `Ge/IEC_G/RotZ = −θ`, because OpenTOPAS uses the IEC rotation convention `world = Rz(−RotZ) · local`:
+
+- The local beam points along component +Y. Rotating `IEC_G` by `RotZ` moves the world-space beam to `(sin RotZ, cos RotZ, 0)`.
+- The TPS convention for gantry `θ` is `w(θ) = (−sin θ, cos θ, 0)` (θ = 0 → +Y, θ = 90° → −X, θ = 270° → +X).
+- Matching the two gives `RotZ = −θ`.
+
+| TPS gantry `θ` | `d:Ge/IEC_G/RotZ` | world-space beam |
+| --- | --- | --- |
+| 0° | `0. deg` | +Y (`y-` → `y+`) |
+| 90° | `270. deg` (= −90°) | −X |
+| 180° | `180. deg` | −Y |
+| 270° | `90. deg` | +X |
+
+Example for TPS 90°:
+
+```text
+d:Ge/IEC_G/RotZ = 270. deg
+```
+
+WARNING: do not set `IEC_G/RotZ = 90` to mean "TPS 90°" — that points the beam at +X, which is TPS 270°. (The validated full-plan cases keep `IEC_G/RotZ = 0` and instead rotate the CT with `Ge/Patient/RotZ = θ`; that "rotate CT, not the beam" setup is equivalent for dose comparison but is a different way of expressing the same irradiation — pick one and keep it consistent.)
+
 ### Coordinate conventions
 
 Default `TPS` (built-in IEC mapping, no user rotation needed):
@@ -154,6 +181,16 @@ Per event, the generator looks up the owning spot from the event ID (`SpotForHis
 ## Multithreading
 
 `Ts/NumberOfThreads` may be greater than 1. The history-to-spot table (`fHistoryBegin` prefix sums) is built once in `ResolveParameters` and read-only afterwards; `SpotForHistory` is a binary search (`upper_bound`) with no mutable state. Geant4 thread-local RNGs sample optics independently per event. Time-ordered delivery / interplay is still not modeled — MT workers generate spots concurrently.
+
+## Example
+
+`example/` is a minimal runnable case (water phantom, no CT data needed):
+
+- `pbs_water.txt` — main TOPAS parameter file. Run from inside `example/` with a TOPAS build that includes this extension: `topas pbs_water.txt`.
+- `spots.csv` — 6 spots / 1200 histories (spot 4 has weight 0 to exercise `SkipZeroWeightSpots`).
+- `beam_model.csv` — machine optics rows covering every spot energy, so the default `InterpolateBeamModel = "False"` works.
+
+Provenance and adaptations: machine numbers (`VirtualScanningMagneticX/Y = 6227.8 / 7008.6 mm`, `SAD = 450 mm`, beam optics, spot positions/energies) come from the RT06423 full-plan case (`run_full_plan.txt`, `spots.csv`, `beam_model.csv`), which instead simulates ~1100 spots / ~15M histories on a DICOM patient with custom LET scorers. The example replaces the DICOM patient with a `G4_WATER` box, drops the custom `myHadronLET` scorers (they need a separate scorer extension), shrinks the plan to 6 spots with small weights, spells out the current-version parameters (`InterpolateBeamModel`, `FirstSpot`, `LastSpot`), and runs 4 threads to demonstrate the MT-safe mapping. Gantry is TPS 0° (`IEC_G/RotZ = 0`); see "Gantry angle" above for other angles.
 
 ## Limitations
 

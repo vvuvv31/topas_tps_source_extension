@@ -1,0 +1,77 @@
+# Minimal PencilBeamScanning smoke test (water phantom, TPS gantry 0).
+#
+# Provenance: machine numbers (VirtualScanningMagneticX/Y, SAD, beam optics)
+# are taken from the RT06423 full-plan case in topas10x
+# (benchmark/topas10x/RT06423: run_full_plan.txt, spots.csv, beam_model.csv).
+# Changes vs that full-plan config (adapted to the current extension version):
+#   - DICOM patient replaced by a water box (no CT data or HU table needed).
+#   - Custom myHadronLET scorers dropped (they need an extra scorer extension);
+#     only the built-in DoseToMedium scorer is used.
+#   - 6 spots / 1200 histories instead of ~1100 spots / ~15M histories.
+#   - Spot 4 has weight 0 on purpose to exercise SkipZeroWeightSpots.
+#   - Added the current-version parameters InterpolateBeamModel, FirstSpot,
+#     LastSpot (defaults shown explicitly).
+#   - Ts/NumberOfThreads = 4: safe in the current version because each event ID
+#     maps to its spot through a read-only prefix table (no shared scheduler).
+#
+# Run from this directory with a TOPAS build that includes this extension, e.g.:
+#   topas pbs_water.txt
+
+i:Ts/Seed = 1
+i:Ts/NumberOfThreads = 4
+i:Ts/ShowHistoryCountAtInterval = 100
+b:Gr/Enable = "False"
+
+s:Ge/World/Material = "Air"
+d:Ge/World/HLX      = 1.0 m
+d:Ge/World/HLY      = 1.0 m
+d:Ge/World/HLZ      = 1.0 m
+
+s:Ge/Phantom/Parent   = "World"
+s:Ge/Phantom/Type     = "TsBox"
+s:Ge/Phantom/Material = "G4_WATER"
+d:Ge/Phantom/HLX      = 100. mm
+d:Ge/Phantom/HLY      = 100. mm
+d:Ge/Phantom/HLZ      = 100. mm
+s:Ge/Phantom/Color    = "blue"
+
+# Gantry: TPS 0 deg here, so IEC_G stays at 0 and the beam runs y- -> y+.
+# For a TPS gantry angle theta, set Ge/IEC_G/RotZ = -theta (see README:
+# TPS angle = -IEC_G because of the OpenTOPAS IEC rotation convention).
+# Example TPS 90 deg: d:Ge/IEC_G/RotZ = 270. deg
+s:Ge/IEC_F/Parent = "World"
+s:Ge/IEC_F/Type   = "Group"
+s:Ge/IEC_G/Parent = "IEC_F"
+s:Ge/IEC_G/Type   = "Group"
+d:Ge/IEC_G/RotX = 0. deg
+d:Ge/IEC_G/RotY = 0. deg
+d:Ge/IEC_G/RotZ = 0. deg
+
+s:Ge/PBSBeamFrame/Parent = "IEC_G"
+s:Ge/PBSBeamFrame/Type   = "Group"
+
+s:Sc/Dose/Quantity                  = "DoseToMedium"
+s:Sc/Dose/Component                 = "Phantom"
+i:Sc/Dose/XBins                     = 20
+i:Sc/Dose/YBins                     = 20
+i:Sc/Dose/ZBins                     = 20
+s:Sc/Dose/OutputType                = "binary"
+s:Sc/Dose/OutputFile                = "Dose_pbs_water"
+s:Sc/Dose/IfOutputFileAlreadyExists = "Overwrite"
+
+s:So/CarbonPBS/Type = "PencilBeamScanning"
+s:So/CarbonPBS/Component = "PBSBeamFrame"
+s:So/CarbonPBS/BeamParticle = "GenericIon(6,12,6)"
+s:So/CarbonPBS/SpotPlanFile = "spots.csv"
+s:So/CarbonPBS/BeamModelFile = "beam_model.csv"
+d:So/CarbonPBS/VirtualScanningMagneticX = 6227.8 mm
+d:So/CarbonPBS/VirtualScanningMagneticY = 7008.6 mm
+d:So/CarbonPBS/VirtualSourceToIsocenterDistance = 450 mm
+b:So/CarbonPBS/SkipZeroWeightSpots = "True"
+s:So/CarbonPBS/WeightMode = "Histories"
+u:So/CarbonPBS/HistoriesScale = 1.0
+b:So/CarbonPBS/InterpolateBeamModel = "False"
+i:So/CarbonPBS/FirstSpot = 0
+i:So/CarbonPBS/LastSpot = -1
+
+sv:Ph/Default/Modules = 7 "g4em-standard_opt4" "g4h-phy_QGSP_BIC_HP" "g4decay" "g4ion-inclxx" "g4h-elastic_HP" "g4stopping" "g4radioactivedecay"
